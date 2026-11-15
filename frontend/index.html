@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NetGuard AI</title>
+<script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<style>
+  body { font-family: -apple-system, system-ui, sans-serif; margin: 0; background: #0f172a; color: #e2e8f0; }
+  header { padding: 20px 32px; border-bottom: 1px solid #1e293b; }
+  h1 { margin: 0; font-size: 22px; }
+  header p { margin: 4px 0 0; color: #94a3b8; font-size: 14px; }
+  main { padding: 24px 32px; max-width: 1100px; margin: 0 auto; }
+  .upload { background: #1e293b; border: 1px dashed #475569; border-radius: 10px; padding: 20px; }
+  #status { margin-top: 10px; font-size: 14px; color: #94a3b8; }
+  #status.error { color: #f87171; }
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; margin: 20px 0; }
+  .card { background: #1e293b; border-radius: 10px; padding: 16px; }
+  .card .num { font-size: 28px; font-weight: 600; }
+  .card .lbl { font-size: 13px; color: #94a3b8; }
+  .charts { display: grid; grid-template-columns: 1fr 2fr; gap: 12px; }
+  .panel { background: #1e293b; border-radius: 10px; padding: 16px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 8px; border-bottom: 1px solid #334155; }
+  th { color: #94a3b8; font-weight: 500; }
+  .bad { color: #f87171; font-weight: 600; }
+  .ok { color: #4ade80; }
+  h2 { font-size: 16px; margin: 24px 0 10px; }
+  #results { display: none; }
+</style>
+</head>
+<body>
+<header>
+  <h1>NetGuard AI</h1>
+  <p>Upload network traffic (UNSW-NB15 CSV). The model flags suspicious connections.</p>
+</header>
+<main>
+  <div class="upload">
+    <input type="file" id="file" accept=".csv">
+    <div id="status">No file yet. Rows are sampled randomly (max 1000).</div>
+  </div>
+
+  <div id="results">
+    <div class="cards">
+      <div class="card"><div class="num" id="c-total">0</div><div class="lbl">Connections analysed</div></div>
+      <div class="card"><div class="num bad" id="c-attack">0</div><div class="lbl">Flagged as attack</div></div>
+      <div class="card"><div class="num ok" id="c-normal">0</div><div class="lbl">Looks normal</div></div>
+      <div class="card"><div class="num" id="c-match">-</div><div class="lbl">Agrees with known labels</div></div>
+    </div>
+
+    <div class="charts">
+      <div class="panel"><canvas id="pie"></canvas></div>
+      <div class="panel"><canvas id="hist"></canvas></div>
+    </div>
+
+    <h2>Most suspicious connections</h2>
+    <div class="panel">
+      <table>
+        <thead><tr><th>#</th><th>proto</th><th>service</th><th>state</th><th>sbytes</th><th>dbytes</th><th>rate</th><th>attack probability</th></tr></thead>
+        <tbody id="table"></tbody>
+      </table>
+    </div>
+  </div>
+</main>
+
+<script>
+const MAX_ROWS = 1000;
+const charts = {};
+Chart.defaults.color = "#cbd5e1";
+
+document.getElementById("file").addEventListener("change", (e) => {
+  const file = e.target.files[0];
+  if (!file) return;
+  setStatus("Reading file...");
+  Papa.parse(file, {
+    header: true, dynamicTyping: true, skipEmptyLines: true,
+    complete: (res) => analyze(res.data),
+    error: (err) => setStatus("Could not read file: " + err.message, true),
+  });
+});
+
+function setStatus(msg, isError = false) {
+  const el = document.getElementById("status");
+  el.textContent = msg;
+  el.className = isError ? "error" : "";
+}
+
+function shuffle(a) {
+  a = a.slice();
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [a[i], a[j]] = [a[j], a[i]];
+  }
+  return a;
+}
+
+async function analyze(rows) {
+  if (!rows.length) return setStatus("The file has no rows.", true);
+  const sample = shuffle(rows).slice(0, MAX_ROWS);
+  setStatus(`Analysing ${sample.length} of ${rows.length} rows...`);
+  try {
+    const resp = await fetch("/predict", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ records: sample }),
+    });
+    const data = await resp.json();
+    if (!resp.ok) {
+      throw new Error(typeof data.detail === "string" ? data.detail : JSON.stringify(data.detail));
+    }
+    render(sample, data.results);
+    setStatus(`Done: analysed ${sample.length} of ${rows.length} rows.`);
+  } catch (err) {
+    setStatus("Error: " + err.message, true);
+  }
+}
+
+function render(rows, results) {
+  document.getElementById("results").style.display = "block";
+  const attacks = results.filter(r => r.label === "attack").length;
+  document.getElementById("c-total").textContent = results.length;
+  document.getElementById("c-attack").textContent = attacks;
+  document.getElementById("c-normal").textContent = results.length - attacks;
+
+  // compare with the true labels if the CSV has a "label" column
+  let match = "-";
+  if (rows[0] && "label" in rows[0]) {
+    const same = results.filter((r, i) => (r.label === "attack" ? 1 : 0) === rows[i].label).length;
+    match = Math.round((same / results.length) * 100) + "%";
+  }
+  document.getElementById("c-match").textContent = match;
+
+  // chart 1: attack vs normal
+  drawChart("pie", {
+    type: "doughnut",
+    data: { labels: ["Normal", "Attack"], datasets: [{ data: [results.length - attacks, attacks], backgroundColor: ["#4ade80", "#f87171"] }] },
+  });
+
+  // chart 2: how confident the model is (10 buckets from 0 to 1)
+  const bins = new Array(10).fill(0);
+  results.forEach(r => { bins[Math.min(9, Math.floor(r.attack_probability * 10))]++; });
+  drawChart("hist", {
+    type: "bar",
+    data: {
+      labels: bins.map((_, i) => (i / 10).toFixed(1) + "-" + ((i + 1) / 10).toFixed(1)),
+      datasets: [{ label: "Connections by attack probability", data: bins, backgroundColor: "#60a5fa" }],
+    },
+  });
+
+  // table: top 15 most suspicious
+  const top = results
+    .map((r, i) => ({ p: r.attack_probability, row: rows[i] }))
+    .sort((a, b) => b.p - a.p)
+    .slice(0, 15);
+  const tbody = document.getElementById("table");
+  tbody.replaceChildren();
+  top.forEach((t, i) => {
+    const tr = document.createElement("tr");
+    [i + 1, t.row.proto, t.row.service, t.row.state, t.row.sbytes, t.row.dbytes, t.row.rate, t.p.toFixed(3)]
+      .forEach(v => {
+        const td = document.createElement("td");
+        td.textContent = v;
+        tr.appendChild(td);
+      });
+    tbody.appendChild(tr);
+  });
+}
+
+function drawChart(id, config) {
+  if (charts[id]) charts[id].destroy();
+  charts[id] = new Chart(document.getElementById(id), config);
+}
+</script>
+</body>
+</html>

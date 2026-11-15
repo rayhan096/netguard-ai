@@ -1,6 +1,6 @@
 import os
 from pathlib import Path
-
+from fastapi.staticfiles import StaticFiles
 import joblib
 import pandas as pd
 from fastapi import FastAPI, HTTPException
@@ -44,3 +44,6 @@ def predict(req: PredictRequest):
             for p in proba
         ]
     }
+
+FRONTEND_DIR = Path(os.getenv("FRONTEND_DIR", Path(__file__).resolve().parent.parent / "frontend"))
+app.mount("/", StaticFiles(directory=FRONTEND_DIR, html=True), name="frontend")
